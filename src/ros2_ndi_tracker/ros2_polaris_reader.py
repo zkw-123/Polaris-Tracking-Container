@@ -8,6 +8,8 @@ import os
 import numpy as np
 import argparse
 import threading
+import json
+from std_msgs.msg import String  # Import String message type
 from sksurgerynditracker.nditracker import NDITracker
 
 class PolarisReader:
@@ -28,7 +30,8 @@ class PolarisReader:
     def load_polaris(self):
         self.SETTINGS = {
             "tracker type": "polaris",
-            "romfiles": self.rom_paths
+            "romfiles": self.rom_paths,
+            "serial port": "/dev/ttyUSB0"  # Serial port configuration
         }
         self.TRACKER = NDITracker(self.SETTINGS)
         if self.save_flag:
@@ -74,34 +77,121 @@ class ROS2PolarisReaderNode(Node):
         self.get_logger().info("Python version: " + sys.version)
         self.get_logger().info("Python installation path: " + sys.executable)
         
-        # Create the PolarisReader instance (same as in your original code)
+        # Create PolarisReader instance
         self.polaris_reader = PolarisReader(rom_paths, save_flag, save_path)
         
-        # Here you can add ROS2 publishers if needed, for example:
-        # from std_msgs.msg import String
-        # self.publisher = self.create_publisher(String, 'polaris_data', 10)
+        # Add publisher to publish to ndi_transforms topic
+        self.publisher = self.create_publisher(String, 'ndi_transforms', 10)
         
         # Log initialization complete
         self.get_logger().info("ROS2 Polaris Reader initialized")
+        self.get_logger().info("Publishing tracking data to 'ndi_transforms' topic")
 
     def run(self):
-        # Start polaris reader in a separate thread (same as in your original code)
+        # Start a thread for updating data and publishing
         self.get_logger().info("Starting Polaris tracking...")
         tracking_thread = threading.Thread(
-            target=self.polaris_reader.run_polaris, 
+            target=self.tracking_loop, 
             daemon=True
         )
         tracking_thread.start()
         
         # Log that tracking has started
         self.get_logger().info("Polaris tracking thread started")
+    
+    def tracking_loop(self):
+        """Tracking loop to read data and publish to topic"""
+        try:
+            self.polaris_reader.TRACKER.start_tracking()
+            counter = 0
+            
+            while rclpy.ok():  # Check if ROS is still running
+                # Get tracking data
+                port_handles, timestamps, framenumbers, trackings, qualities = self.polaris_reader.TRACKER.get_frame()
+                
+                # Print data to console (same as original code)
+                for i, timestamp in enumerate(timestamps):
+                    print(f"[{i}] {timestamp}")
+                    print(trackings[i])
+                
+                # Save data (if enabled)
+                if self.polaris_reader.save_flag:
+                    for i, tracking in enumerate(trackings):
+                        if i < len(self.polaris_reader.save_rom_paths):
+                            np.savetxt(
+                                os.path.join(self.polaris_reader.save_rom_paths[i], f"{counter}.txt"), 
+                                tracking, 
+                                fmt='%.10f', 
+                                delimiter='\t'
+                            )
+                    counter += 1
+                
+                # Publish tracking data to ROS topic
+                self.publish_tracking_data(port_handles, timestamps, framenumbers, trackings, qualities)
+                
+        except Exception as e:
+            self.get_logger().error(f"Error in tracking loop: {str(e)}")
+        finally:
+            # Ensure tracker is closed on error or exit
+            try:
+                self.polaris_reader.TRACKER.stop_tracking()
+                self.polaris_reader.TRACKER.close()
+                self.get_logger().info("Polaris tracking stopped")
+            except Exception as e:
+                self.get_logger().error(f"Error stopping tracker: {str(e)}")
+    
+    def publish_tracking_data(self, port_handles, timestamps, framenumbers, trackings, qualities):
+        """Publish tracking data to ndi_transforms topic"""
+        try:
+            # Prepare transform data
+            transforms_data = []
+            
+            for i, tracking in enumerate(trackings):
+                if i < len(port_handles):
+                    # Extract translation and rotation data from tracking matrix
+                    matrix = tracking.tolist() if isinstance(tracking, np.ndarray) else tracking
+                    
+                    # Create transform info object
+                    transform_info = {
+                        "tool_id": int(port_handles[i]) if isinstance(port_handles[i], (int, np.integer)) else str(port_handles[i]),
+                        "quality": float(qualities[i]) if i < len(qualities) else 0.0,
+                        "matrix": matrix
+                    }
+                    
+                    # If matrix is 4x4, we can also extract translation and rotation
+                    if isinstance(tracking, np.ndarray) and tracking.shape == (4, 4):
+                        # Extract translation vector (first 3 rows of last column)
+                        transform_info["translation"] = tracking[:3, 3].tolist()
+                        
+                        # More info can be added, such as extracting quaternion from matrix
+                        # Quaternion calculation code can be added here if needed
+                    
+                    transforms_data.append(transform_info)
+            
+            # Create the complete data object
+            data = {
+                "timestamp": str(timestamps[0]) if timestamps else "",
+                "frame_number": int(framenumbers[0]) if framenumbers else 0,
+                "transforms": transforms_data
+            }
+            
+            # Create and publish message
+            msg = String()
+            msg.data = json.dumps(data)
+            self.publisher.publish(msg)
+            
+            # Log publishing event (optional)
+            # self.get_logger().debug(f"Published tracking data with {len(transforms_data)} transforms")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error publishing tracking data: {str(e)}")
 
 
 def main(args=None):
     # Initialize ROS2
     rclpy.init(args=args)
     
-    # Parse command line arguments (same as in your original code)
+    # Parse command line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument('--rom_path', help="rom file paths", action="append")
     parser.add_argument('--save_flag', help="save_flag", action="store_true")
