@@ -19,7 +19,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'ndi_tracker_node = ros2_ndi_tracker.ndi_tracker_node:main',
             'client_node = ros2_ndi_tracker.client_node:main',
             'ros2_polaris_reader = ros2_ndi_tracker.ros2_polaris_reader:main',
         ],
